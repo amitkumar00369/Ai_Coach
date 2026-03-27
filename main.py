@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 import torch
 from transformers import CLIPProcessor, CLIPModel, pipeline
+from build_index import build_data
 
 app = FastAPI()
 
@@ -24,10 +25,7 @@ llm = pipeline(
 # -----------------------------
 # Load Vector DB
 # -----------------------------
-index = faiss.read_index("index/faiss.index")
 
-with open("index/metadata.pkl", "rb") as f:
-    metadata = pickle.load(f)
 
 # -----------------------------
 # User Input
@@ -40,6 +38,7 @@ class UserInput(BaseModel):
     diet: str
     level: str
     time_available: int
+    day: int
 
 # -----------------------------
 # Encode Query
@@ -101,10 +100,11 @@ def validate_user(user):
 # -----------------------------
 # CORE PLAN BUILDER (IMPORTANT)
 # -----------------------------
+
 def build_base_plan(user, exercises, meals):
     plan = []
 
-    for i in range(7):
+    for i in range(user.day):
         day_plan = {
             "day": i + 1,
             "workout": exercises[i % len(exercises)]["name"] if exercises else "Rest",
@@ -169,6 +169,23 @@ def add_nutrition(plan):
 # -----------------------------
 # API
 # -----------------------------
+def load_index():
+    global index, metadata
+
+    index = faiss.read_index("index/faiss.index")
+
+    with open("index/metadata.pkl", "rb") as f:
+        metadata = pickle.load(f)
+@app.get("/build_model")
+async def buildModel():
+    try:
+        build_data()
+        load_index()   # 🔥 reload after build
+        return {"message": "Index rebuilt & loaded"}
+    except Exception as e:
+        return {"error": str(e)}
+        
+        
 @app.post("/ai-coach")
 async def ai_coach(user: UserInput):
     try:

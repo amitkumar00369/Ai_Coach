@@ -1,9 +1,13 @@
 import faiss
 import numpy as np
 import pickle
+import os
 from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
 import requests
+
+# ✅ FIX IMPORT (use correct module)
+from datasets import recipes, running, nutrition, exercises
 
 # -----------------------------
 # Load CLIP
@@ -14,165 +18,109 @@ processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 # -----------------------------
 # Dataset
 # -----------------------------
-data = [
+data = recipes + running + nutrition + exercises
 
-    # ---------------- EXERCISES ----------------
-    {
-        "type": "exercise",
-        "name": "Bench Press",
-        "goal": "muscle_gain",
-        "description": "chest strength training using barbell",
-        "muscle_group": "chest",
-        "difficulty": "beginner",
-        "image": "https://example.com/images/bench_press.jpg",
-        "video": "https://youtube.com/shorts/Xx5SHfyukek"
-    },
-    {
-        "type": "exercise",
-        "name": "Push-up",
-        "goal": "muscle_gain",
-        "description": "bodyweight chest exercise",
-        "muscle_group": "chest",
-        "difficulty": "beginner",
-        "image": "https://example.com/images/pushup.jpg",
-        "video": "https://youtube.com/shorts/pushup123"
-    },
-    {
-        "type": "exercise",
-        "name": "Squats",
-        "goal": "muscle_gain",
-        "description": "lower body strength exercise",
-        "muscle_group": "legs",
-        "difficulty": "beginner",
-        "image": "https://example.com/images/squats.jpg",
-        "video": "https://youtube.com/shorts/squat123"
-    },
-
-    # ---------------- RECIPES ----------------
-    {
-        "type": "recipe",
-        "name": "Paneer Salad",
-        "goal": "muscle_gain",
-        "description": "high protein vegetarian meal",
-        "calories": 350,
-        "protein": 20,
-        "diet": "veg",
-        "image": "https://example.com/images/paneer_salad.jpg",
-        "video": "https://youtube.com/shorts/phRtlOG0Ry0"
-    },
-    {
-        "type": "recipe",
-        "name": "Oats with Milk",
-        "goal": "muscle_gain",
-        "description": "high protein breakfast",
-        "calories": 300,
-        "protein": 12,
-        "diet": "veg",
-        "image": "https://example.com/images/oats.jpg",
-        "video": "https://youtube.com/shorts/oats123"
-    },
-    {
-        "type": "recipe",
-        "name": "Dal Rice",
-        "goal": "muscle_gain",
-        "description": "protein rich Indian meal",
-        "calories": 400,
-        "protein": 15,
-        "diet": "veg",
-        "image": "https://example.com/images/dal_rice.jpg",
-        "video": "https://youtube.com/shorts/dal123"
-    },
-
-    # ---------------- WORKOUT PLANS ----------------
-    {
-        "type": "workout",
-        "name": "Beginner Muscle Gain Plan",
-        "goal": "muscle_gain",
-        "description": "full body workout plan",
-        "duration": 45,
-        "image": None,
-        "video": None
-    },
-
-    # ---------------- NUTRITION ----------------
-    {
-        "type": "nutrition",
-        "name": "High Protein Diet",
-        "goal": "muscle_gain",
-        "description": "balanced diet for muscle growth",
-        "protein_target": "80g/day",
-        "image": None,
-        "video": None
-    }
-]
 
 # -----------------------------
-# Encoding Functions (FIXED)
+# Ensure index folder exists
+# -----------------------------
+os.makedirs("index", exist_ok=True)
+
+
+# -----------------------------
+# Encoding Functions
 # -----------------------------
 def encode_text(text):
     inputs = processor(text=[text], return_tensors="pt", padding=True)
 
     outputs = model.get_text_features(**inputs)
 
-    # 🔥 HANDLE DIFFERENT RETURN TYPES
+    # Handle different output formats
     if hasattr(outputs, "pooler_output"):
         outputs = outputs.pooler_output
 
     vec = outputs.detach().numpy()[0]
 
     # Normalize
-    vec = vec / np.linalg.norm(vec)
+    vec = vec / np.clip(np.linalg.norm(vec), 1e-10, None)
 
     return vec
 
 
-def encode_image(url):
-    try:
-        image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt")
+# ⚡ OPTIONAL: disable image for faster build
+USE_IMAGE = False
 
+
+def encode_image(url):
+    if not USE_IMAGE:
+        return None
+
+    try:
+        response = requests.get(url, timeout=3)
+        image = Image.open(response.raw).convert("RGB")
+
+        inputs = processor(images=image, return_tensors="pt")
         outputs = model.get_image_features(**inputs)
 
         if hasattr(outputs, "pooler_output"):
             outputs = outputs.pooler_output
 
         vec = outputs.detach().numpy()[0]
-
-        # Normalize
-        vec = vec / np.linalg.norm(vec)
+        vec = vec / np.clip(np.linalg.norm(vec), 1e-10, None)
 
         return vec
-    except:
+
+    except Exception as e:
+        print("Image error:", e)
         return None
 
 
 # -----------------------------
 # Build Index
 # -----------------------------
-vectors = []
-metadata = []
+def build_data():
 
-for item in data:
-    text_input = f"{item['name']} {item['goal']} {item['description']}"
-    text_vec = encode_text(text_input)
+    print("🚀 Building index...")
 
-    vectors.append(text_vec)
-    metadata.append(item)
+    vectors = []
+    metadata = []
 
-    if item["image"]:
+    for i, item in enumerate(data):
+
+        # Add dummy media
+        item["image"] = f"https://dummyimage.com/300x300&text={item['name']}"
+        item["video"] = "https://youtube.com/shorts/demo"
+
+        # Text embedding
+        text_input = f"{item['name']} {item.get('goal','')} {item.get('description','')}"
+        text_vec = encode_text(text_input)
+
+        vectors.append(text_vec)
+        metadata.append(item)
+
+        # Image embedding (optional)
         img_vec = encode_image(item["image"])
         if img_vec is not None:
             vectors.append(img_vec)
             metadata.append(item)
 
-vectors = np.array(vectors).astype("float32")
+        print(f"✅ Processed {i+1}/{len(data)}")
 
-index = faiss.IndexFlatL2(vectors.shape[1])
-index.add(vectors)
+    # Convert to numpy
+    vectors = np.array(vectors).astype("float32")
 
-faiss.write_index(index, "index/faiss.index")
+    # Build FAISS index
+    index = faiss.IndexFlatL2(vectors.shape[1])
+    index.add(vectors)
 
-with open("index/metadata.pkl", "wb") as f:
-    pickle.dump(metadata, f)
+    # Save
+    faiss.write_index(index, "index/faiss.index")
 
-print("✅ Index built successfully")
+    with open("index/metadata.pkl", "wb") as f:
+        pickle.dump(metadata, f)
+
+    print("✅ Index built successfully")
+
+    return {"message": "Index built successfully"}
+
+# print(build_data())
